@@ -56,6 +56,11 @@
 #define LVGL_TASK_MAX_DELAY_MS 500
 #define LVGL_TASK_MIN_DELAY_MS 1
 
+#define SENSOR_DRY_MV 2200
+#define SENSOR_WET_MV 950
+#define BG_COLOR 0x1976D2
+#define TEXT_COLOR 0xFFFFFF
+#define FILL_COLOR 0xFF9800
 static const char *TAG = "zmu_plant_monitor";
 static lv_indev_drv_t input_driver;  // Input device driver (Touch)
 static lv_disp_drv_t display_driver; /*Descriptor of a display driver*/
@@ -65,6 +70,9 @@ esp_lcd_panel_handle_t panel_handle;
 esp_lcd_touch_handle_t touch_handle;
 
 lv_obj_t *label_brightness;
+lv_obj_t *label_moisture_percent;
+lv_obj_t *label_moisture_status;
+lv_obj_t *bar_moisture;
 
 lv_timer_t *brightness_timer = NULL;
 adc_oneshot_unit_handle_t adc1_handle;
@@ -116,6 +124,57 @@ bool lvgl_lock(int timeout_ms) {
   return xSemaphoreTakeRecursive(lvgl_api_mux, timeout_ticks) == pdTRUE;
 }
 
+const char* get_moisture_status(int percentage) {
+    if (percentage >= 80) return "Overwatered!";
+    if (percentage >= 50) return "Water Later";
+    if (percentage >= 20) return "Water Soon";
+    return "Water Now!";
+}
+
+int map_moisture_to_percent(int current_mv) {
+    if (current_mv >= SENSOR_DRY_MV) return 0;
+    if (current_mv <= SENSOR_WET_MV) return 100;
+
+    int range = SENSOR_DRY_MV - SENSOR_WET_MV;
+    int percentage = ((SENSOR_DRY_MV - current_mv) * 100) / range;
+    
+    return percentage;
+}
+
+void lvgl_moisture_ui_init(void) {
+    lv_obj_t *screen = lv_scr_act();
+
+    lv_obj_set_style_bg_color(screen, lv_color_hex(BG_COLOR), 0);
+    lv_obj_set_style_text_color(screen, lv_color_hex(TEXT_COLOR), 0);
+
+    bar_moisture = lv_bar_create(screen);
+    lv_obj_set_size(bar_moisture, 200, 30);
+    lv_obj_align(bar_moisture, LV_ALIGN_CENTER, 0, 0);
+    lv_bar_set_range(bar_moisture, 0, 100); // 0 to 100 percent
+    lv_obj_set_style_bg_color(bar_moisture, lv_color_hex(FILL_COLOR), LV_PART_INDICATOR); 
+
+    label_moisture_percent = lv_label_create(screen);
+    lv_label_set_text(label_moisture_percent, "0%");
+    lv_obj_align_to(label_moisture_percent, bar_moisture, LV_ALIGN_OUT_TOP_MID, 0, -10);
+
+    label_moisture_status = lv_label_create(screen);
+    lv_label_set_text(label_moisture_status, "Checking...");
+    lv_obj_align_to(label_moisture_status, bar_moisture, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+}
+
+void update_sensor_data_callback(lv_timer_t *timer) {
+    int voltage = read_moisture_voltage(my_adc_handle, my_cali_handle);
+    int percent = map_moisture_to_percent(voltage);
+    const char* status_text = get_moisture_status(percent);
+    ESP_LOGI(TAG, "Moisture: %d mV -> %d%%", voltage, percent);
+    
+    lv_bar_set_value(bar_moisture, percent, LV_ANIM_ON);
+    lv_label_set_text_fmt(label_moisture_percent, "Moisture Level: %d%%", percent);
+    lv_obj_align_to(label_moisture_percent, bar_moisture, LV_ALIGN_OUT_TOP_MID, 0, -10);
+    lv_label_set_text(label_moisture_status, status_text);
+    lv_obj_align_to(label_moisture_status, bar_moisture, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
+}
+
 void lvgl_unlock(void) { xSemaphoreGiveRecursive(lvgl_api_mux); }
 
 static bool notify_lvgl_flush_ready(
@@ -151,11 +210,6 @@ static void lvgl_flush_callback(
       offset_y2 + 1,
       color_map
   );
-}
-
-void update_sensor_data_cb(lv_timer_t *timer) {
-  int voltage = read_moisture_voltage(my_adc_handle, my_cali_handle);
-  lv_label_set_text_fmt(label_voltage, "Moisture: %d mV", voltage);
 }
 
 static void lvgl_touch_callback(lv_indev_drv_t *drv, lv_indev_data_t *data) {
@@ -397,6 +451,8 @@ static void run_lvgl(void *param) {
   }
 }
 
+
+
 void slider_event_callback(lv_event_t *e) {
   lv_event_code_t code = lv_event_get_code(e);
   if (code == LV_EVENT_VALUE_CHANGED) {
@@ -455,8 +511,9 @@ void app_main(void) {
   backlight_init();
   backlight_set_level(80);
   if (lvgl_lock(-1)) {
-    lvgl_brightness_ui_init(lv_scr_act());
-    lv_timer_create(update_sensor_data_cb, 500, NULL);
+    // lvgl_brightness_ui_init(lv_scr_act());
+    lvgl_moisture_ui_init();
+    lv_timer_create(update_sensor_data_callback, 500, NULL);
     lvgl_unlock();
   }
   xTaskCreatePinnedToCore(run_lvgl, "lvgl_task", 1024 * 20, NULL, 5, NULL, 1);
