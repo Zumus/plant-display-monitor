@@ -5,6 +5,7 @@
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -15,6 +16,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "hal/adc_types.h"
 #include "lvgl.h"
 
 #define PIN_NUM_SCLK 39
@@ -65,6 +67,45 @@ esp_lcd_touch_handle_t touch_handle;
 lv_obj_t *label_brightness;
 
 lv_timer_t *brightness_timer = NULL;
+adc_oneshot_unit_handle_t adc1_handle;
+adc_oneshot_unit_handle_t my_adc_handle;
+adc_cali_handle_t my_cali_handle;
+lv_obj_t *label_voltage;
+
+adc_oneshot_unit_handle_t initialize_adc() {
+  // Initialize ADC unit
+  adc_oneshot_unit_init_cfg_t init_config1 = {
+      .unit_id = ADC_UNIT_1,
+      .ulp_mode = ADC_ULP_MODE_DISABLE,
+  };
+  ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+
+  // Configure channel
+  adc_oneshot_chan_cfg_t config = {
+    .bitwidth = ADC_BITWIDTH_DEFAULT,
+    .atten = ADC_ATTEN_DB_12 // read up to 3.3V
+  };
+  ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_1, &config));
+  return adc1_handle;
+}
+
+int read_moisture_voltage(adc_oneshot_unit_handle_t adc_handle, adc_cali_handle_t calibration_handle) {
+  int raw_value, voltage;
+  ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, ADC_CHANNEL_1, &raw_value));
+  ESP_ERROR_CHECK(adc_cali_raw_to_voltage(calibration_handle, raw_value, &voltage));
+  return voltage;
+}
+
+adc_cali_handle_t initialize_calibration() {
+  adc_cali_handle_t calibration_handle = NULL;
+  adc_cali_curve_fitting_config_t calibration_config = {
+    .unit_id = ADC_UNIT_1,
+    .atten = ADC_ATTEN_DB_12,
+    .bitwidth = ADC_BITWIDTH_DEFAULT,
+  };
+  ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&calibration_config, &calibration_handle));
+  return calibration_handle;
+}
 
 bool lvgl_lock(int timeout_ms) {
   // Convert timeout in milliseconds to FreeRTOS ticks
@@ -110,6 +151,11 @@ static void lvgl_flush_callback(
       offset_y2 + 1,
       color_map
   );
+}
+
+void update_sensor_data_cb(lv_timer_t *timer) {
+  int voltage = read_moisture_voltage(my_adc_handle, my_cali_handle);
+  lv_label_set_text_fmt(label_voltage, "Moisture: %d mV", voltage);
 }
 
 static void lvgl_touch_callback(lv_indev_drv_t *drv, lv_indev_data_t *data) {
@@ -391,9 +437,14 @@ void lvgl_brightness_ui_init(lv_obj_t *parent) {
   label_brightness = lv_label_create(obj);
   lv_label_set_text(label_brightness, "80%");
   lv_obj_align(label_brightness, LV_ALIGN_TOP_MID, 0, 0);
+  label_voltage = lv_label_create(parent);
+  lv_label_set_text(label_voltage, "Moisture: Reading...");
+  lv_obj_align(label_voltage, LV_ALIGN_BOTTOM_MID, 0, -50);
 }
 
 void app_main(void) {
+  my_adc_handle = initialize_adc();
+  my_cali_handle = initialize_calibration();
   lvgl_api_mux = xSemaphoreCreateRecursiveMutex();
   lv_init();
   display_init();
@@ -405,6 +456,7 @@ void app_main(void) {
   backlight_set_level(80);
   if (lvgl_lock(-1)) {
     lvgl_brightness_ui_init(lv_scr_act());
+    lv_timer_create(update_sensor_data_cb, 500, NULL);
     lvgl_unlock();
   }
   xTaskCreatePinnedToCore(run_lvgl, "lvgl_task", 1024 * 20, NULL, 5, NULL, 1);
