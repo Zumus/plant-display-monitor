@@ -58,9 +58,9 @@
 
 #define SENSOR_DRY_MV 2200
 #define SENSOR_WET_MV 950
-#define BG_COLOR 0x1976D2
+#define BG_COLOR 0x2774AE
 #define TEXT_COLOR 0xFFFFFF
-#define FILL_COLOR 0xFF9800
+#define FILL_COLOR 0xFFD100
 static const char *TAG = "zmu_plant_monitor";
 static lv_indev_drv_t input_driver;  // Input device driver (Touch)
 static lv_disp_drv_t display_driver; /*Descriptor of a display driver*/
@@ -125,10 +125,10 @@ bool lvgl_lock(int timeout_ms) {
 }
 
 const char* get_moisture_status(int percentage) {
-    if (percentage >= 80) return "Overwatered!";
+    if (percentage >= 80) return "Overwatered";
     if (percentage >= 50) return "Water Later";
     if (percentage >= 20) return "Water Soon";
-    return "Water Now!";
+    return "Water Now";
 }
 
 int map_moisture_to_percent(int current_mv) {
